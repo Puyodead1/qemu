@@ -131,6 +131,133 @@ static void hda_codec_parse_fmt(uint32_t format, struct audsettings *as)
 #define   PARAM nomixemu
 #include  "hda-codec-common.h"
 
+/*
+ * Realtek ALC262 personality, for guests whose kernel only has the Realtek
+ * codec driver (no generic parser), e.g. the IGS E2100 2.6.32 kernel.
+ *
+ * patch_alc262 hard-codes NIDs: front DAC 0x02, front mixer 0x0c and
+ * line-out pin 0x14.  Its auto-config maps pin 0x14 to DAC 0x02, and its
+ * fallback "basic" model plays through the same DAC, so only this path is
+ * modelled.  Verbs to absent widgets (COEF on 0x20, other pins, ADCs) get
+ * a zero response from hda_audio_command().  No mixer emulation: the driver's
+ * amp writes on 0x0c/0x14 would otherwise hit the DAC stream.
+ */
+#define QEMU_HDA_ID_ALC262      0x10ec0262
+#define QEMU_HDA_SSID_ALC262    ((QEMU_HDA_ID_VENDOR << 16) | 0x0262)
+
+static const desc_param alc262_params_root[] = {
+    {
+        .id  = AC_PAR_VENDOR_ID,
+        .val = QEMU_HDA_ID_ALC262,
+    },{
+        .id  = AC_PAR_SUBSYSTEM_ID,
+        .val = QEMU_HDA_SSID_ALC262,
+    },{
+        .id  = AC_PAR_REV_ID,
+        .val = 0x00100002,
+    },{
+        .id  = AC_PAR_NODE_COUNT,
+        .val = 0x00010001,
+    },
+};
+
+static const desc_param alc262_params_audio_func[] = {
+    {
+        .id  = AC_PAR_FUNCTION_TYPE,
+        .val = AC_GRP_AUDIO_FUNCTION,
+    },{
+        .id  = AC_PAR_SUBSYSTEM_ID,
+        .val = QEMU_HDA_SSID_ALC262,
+    },{
+        .id  = AC_PAR_NODE_COUNT,
+        .val = 0x00020013,      /* widgets 0x02 .. 0x14 */
+    },{
+        .id  = AC_PAR_PCM,
+        .val = QEMU_HDA_PCM_FORMATS,
+    },{
+        .id  = AC_PAR_STREAM,
+        .val = AC_SUPFMT_PCM,
+    },{
+        .id  = AC_PAR_AMP_IN_CAP,
+        .val = QEMU_HDA_AMP_NONE,
+    },{
+        .id  = AC_PAR_AMP_OUT_CAP,
+        .val = QEMU_HDA_AMP_NONE,
+    },{
+        .id  = AC_PAR_GPIO_CAP,
+        .val = 0,
+    },{
+        .id  = AC_PAR_AUDIO_FG_CAP,
+        .val = 0x00000808,
+    },{
+        .id  = AC_PAR_POWER_STATE,
+        .val = 0,
+    },
+};
+
+static const desc_param alc262_params_mixer[] = {
+    {
+        .id  = AC_PAR_AUDIO_WIDGET_CAP,
+        .val = ((AC_WID_AUD_MIX << AC_WCAP_TYPE_SHIFT) |
+                AC_WCAP_CONN_LIST |
+                AC_WCAP_STEREO),
+    },{
+        .id  = AC_PAR_CONNLIST_LEN,
+        .val = 1,
+    },{
+        .id  = AC_PAR_AMP_IN_CAP,
+        .val = QEMU_HDA_AMP_NONE,
+    },{
+        .id  = AC_PAR_AMP_OUT_CAP,
+        .val = QEMU_HDA_AMP_NONE,
+    },
+};
+
+static const desc_node alc262_nodes[] = {
+    {
+        .nid     = AC_NODE_ROOT,
+        .name    = "root",
+        .params  = alc262_params_root,
+        .nparams = ARRAY_SIZE(alc262_params_root),
+    },{
+        .nid     = 1,
+        .name    = "func",
+        .params  = alc262_params_audio_func,
+        .nparams = ARRAY_SIZE(alc262_params_audio_func),
+    },{
+        .nid     = 0x02,
+        .name    = "dac",
+        .params  = common_params_audio_dac_nomixemu,
+        .nparams = ARRAY_SIZE(common_params_audio_dac_nomixemu),
+        .stindex = 0,
+    },{
+        .nid     = 0x0c,
+        .name    = "mixer",
+        .params  = alc262_params_mixer,
+        .nparams = ARRAY_SIZE(alc262_params_mixer),
+        .conn    = (uint32_t[]) { 0x02 },
+    },{
+        .nid     = 0x14,
+        .name    = "out",
+        .params  = common_params_audio_lineout_nomixemu,
+        .nparams = ARRAY_SIZE(common_params_audio_lineout_nomixemu),
+        .config  = ((AC_JACK_PORT_COMPLEX << AC_DEFCFG_PORT_CONN_SHIFT) |
+                    (AC_JACK_LINE_OUT     << AC_DEFCFG_DEVICE_SHIFT)    |
+                    (AC_JACK_CONN_UNKNOWN << AC_DEFCFG_CONN_TYPE_SHIFT) |
+                    (AC_JACK_COLOR_GREEN  << AC_DEFCFG_COLOR_SHIFT)     |
+                    0x10),
+        .pinctl  = AC_PINCTL_OUT_EN,
+        .conn    = (uint32_t[]) { 0x0c },
+    }
+};
+
+static const desc_codec alc262 = {
+    .name   = "alc262",
+    .iid    = QEMU_HDA_SSID_ALC262,
+    .nodes  = alc262_nodes,
+    .nnodes = ARRAY_SIZE(alc262_nodes),
+};
+
 #define HDA_TIMER_TICKS (SCALE_MS)
 #define B_SIZE sizeof(st->buf)
 #define B_MASK (sizeof(st->buf) - 1)
@@ -838,6 +965,14 @@ static void hda_audio_init_micro(HDACodecDevice *hda, Error **errp)
     hda_audio_init(hda, desc, errp);
 }
 
+static void hda_audio_init_alc262(HDACodecDevice *hda, Error **errp)
+{
+    HDAAudioState *a = HDA_AUDIO(hda);
+
+    a->mixer = false;   /* amp writes on 0x0c/0x14 must not touch the DAC */
+    hda_audio_init(hda, &alc262, errp);
+}
+
 static void hda_audio_base_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -905,12 +1040,28 @@ static const TypeInfo hda_audio_micro_info = {
     .class_init    = hda_audio_micro_class_init,
 };
 
+static void hda_audio_alc262_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    HDACodecDeviceClass *k = HDA_CODEC_DEVICE_CLASS(klass);
+
+    k->init = hda_audio_init_alc262;
+    dc->desc = "HDA Audio Codec, Realtek ALC262 personality (line-out)";
+}
+
+static const TypeInfo hda_audio_alc262_info = {
+    .name          = "hda-alc262",
+    .parent        = TYPE_HDA_AUDIO,
+    .class_init    = hda_audio_alc262_class_init,
+};
+
 static void hda_audio_register_types(void)
 {
     type_register_static(&hda_audio_info);
     type_register_static(&hda_audio_output_info);
     type_register_static(&hda_audio_duplex_info);
     type_register_static(&hda_audio_micro_info);
+    type_register_static(&hda_audio_alc262_info);
 }
 
 type_init(hda_audio_register_types)
